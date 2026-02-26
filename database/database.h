@@ -1,9 +1,9 @@
 #include "../antiviRus/antiviRus.h"
 
-
 struct s_entry {
     int32 fileoffset;
     int32 diroffset;
+    bool deleted;
 };
 
 typedef struct s_entry Entry;
@@ -23,6 +23,10 @@ struct s_database {
     int32 foldercap;   // Capacitatea folderhashes
     int32 foldernum;  // Numarul de foldere unice
 
+    int32 *filehashes;   // Aici avem offseturile fisierelor in functie de hashuri
+    int32 filecap;   // Capacitatea filehashes
+    int32 filenum;  // Numarul de fisiere unice
+
     int8 *pool;         // Rezervorul de memorie (String Pool) pentru nume
     int32 poolcap;    // Capacitatea pool-ului
     int32 poolused;   // Cat din pool am folosit deja
@@ -30,13 +34,15 @@ struct s_database {
     int32 cap;          // Capacitatea curenta (numar de entries)
     int32 num;          // Numarul actual de fisiere salvate
     int32 hashsize;
+
+    SRWLOCK lock;
 };
 
 typedef struct s_database Database;
 
-int32 hash(Database *, int8 *, int8 *, int8);
+int32 hash(int8 *, int8 *, int8);
 
-int32 hashpath(Database *, int8 *, int8);
+int32 hashpath(int8 *, int8);
 
 Database *mkdatabase();
 
@@ -50,14 +56,16 @@ int32 addfilepool(Database *, int8 *);
 
 void dirhashresize(Database *);
 
+void filehashresize(Database *);
+
 void hashresize(Database *);
 
 void findbypathdb(Database *, int8 *);
 
-void popfromdb(Database *, int8 *);
-
-void destroydb(Database *);
+void lazypopfromdb(Database *, int8 *);
 
 void showdb(Database *);
+
+void destroydb(Database *);
 
 typedef struct s_database Database;

@@ -1,39 +1,71 @@
 #include "workqueue.h"
-#include "../antiviRus/antiviRus.h"
 
 Workqueue *mkqueue() {
-    Workqueue *wq;
-
-    wq = (Workqueue *)malloc($i sizeof(Workqueue));
+    Workqueue *wq = (Workqueue *)malloc(sizeof(Workqueue));
     assert(wq);
-    wq->head = NULL;
-    wq->tail = NULL;
-    InitializeCriticalSection(&wq->lock);
-    InitializeConditionVariable(&wq->has_work);
-    wq->finished = false;
+    wq->items = $4 malloc($i Workqueuesize * sizeof(int32));
+    assert(wq->items);
+    wq->h = 0;
+    wq->t = 0;
+    wq->num = 0;
+    wq->cap = Workqueuesize;
+    InitializeSRWLock(&wq->lock);
+    InitializeConditionVariable(&wq->not_empty);
+    InitializeConditionVariable(&wq->not_full);
 
     return wq;
 }
 
-// void pushqueue(Workqueue *wq, Entry *entry) {
-//     Node *new_node;
+void pushqueue(Workqueue *wq, int32 index) {
+    AcquireSRWLockExclusive(&wq->lock); 
+    while (wq->num == wq->cap) {
+        SleepConditionVariableSRW(&wq->not_full, &wq->lock, INFINITE, 0); // Folosim wq->not_full pe post de wake condition, wq->lock se deschide pentru a permite altor threaduri sa curete coada
+    }
+    wq->items[wq->t] = index;  // Folosim index deoarece daca am folosi pointer-ul, Entry-urile pot fi mutate in memorie in timpul resize-ului bazei de date si astfel accesezi o zona de memorie invalida
+    wq->t = (wq->t + 1) % wq->cap;
+    wq->num++;
+    WakeConditionVariable(&wq->not_empty); 
+    ReleaseSRWLockExclusive(&wq->lock);
+}
 
-//     new_node = (Node *)malloc($i sizeof(Node));
-//     assert(new_node);
-//     memset($1 new_node, 0, sizeof(Node));
-//     new_node->path = (int8 *)malloc($i (strlen($c entry->path) + 1) * sizeof(int8));
-//     assert(new_node->path);
-//     strcpy($c new_node->path, $c entry->path);
-//     new_node->next = NULL;
+int32 popqueue(Workqueue *wq) {
+    AcquireSRWLockExclusive(&wq->lock); 
+    while (wq->num == 0) {
+        SleepConditionVariableSRW(&wq->not_empty, &wq->lock, INFINITE, 0);
+    }
+    int32 index = wq->items[wq->h];
+    wq->h = (wq->h + 1) % wq->cap;
+    wq->num--;
+    WakeConditionVariable(&wq->not_full); 
+    ReleaseSRWLockExclusive(&wq->lock);
+    
+    return index;
+}
 
-//     EnterCriticalSection(&wq->lock);
-//     if (wq->tail) {
-//         wq->tail->next = new_node;
-//         wq->tail = new_node;
-//     } else {
-//         wq->head = new_node;
-//         wq->tail = new_node;
-//     }
-//     WakeConditionVariable(&wq->has_work);
-//     LeaveCriticalSection(&wq->lock);
-// }
+void showqueue(Workqueue *wq) {
+    AcquireSRWLockShared(&wq->lock); 
+
+    if (!wq || wq->num == 0) {
+        printf("Queue is empty.\n");
+        ReleaseSRWLockShared(&wq->lock);
+        return;
+    }
+
+    printf("--- Queue Contents (%d items) ---\n", wq->num);
+    int32 index = wq->h;
+    for (int32 i = 0; i < wq->num; i++) {
+        printf("[%d] Index: %d\n", i, wq->items[index]);
+        index = (index + 1) % wq->cap;
+    }
+    printf("--- End of Queue ---\n");
+    ReleaseSRWLockShared(&wq->lock);
+}
+
+void destroyqueue(Workqueue *wq) {
+    if (!wq) return;
+
+    if (wq->items) 
+        free(wq->items);
+
+    free(wq);
+}

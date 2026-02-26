@@ -1,28 +1,26 @@
 #include "../antiviRus/antiviRus.h"
 #include "../database/database.h"
 
-struct s_node {
-    int8 * path;
-    struct s_node *next;    
-};
-
-typedef struct s_node Node;
-
 struct s_queue {
-    Node *head, *tail;
-    CRITICAL_SECTION lock;
-    CONDITION_VARIABLE has_work; 
-    bool finished;
+    int32 *items;           
+    int32 cap; // punem capacity aici pentru a putea sa il incarcam in cache si sa nu trebuiasca sa il luam din define
+    int32 h;
+    int32 t;
+    int32 num;
+
+    SRWLOCK lock;          
+    CONDITION_VARIABLE not_empty;
+    CONDITION_VARIABLE not_full;
 };
 
 typedef struct s_queue Workqueue;
 
 Workqueue *mkqueue();
 
-void pushqueue(Workqueue *, Entry *);
+void pushqueue(Workqueue *, int32);
 
-void popqueue(Workqueue *, Entry *);
-
-void destroyqueue(Workqueue *);
+int32 popqueue(Workqueue *);
 
 void showqueue(Workqueue *);
+
+void destroyqueue(Workqueue *);
