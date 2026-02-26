@@ -1,0 +1,57 @@
+abandonez ideea de baza de date mai intai si ma focusez pe cautarea pe threaduri
+
+pentru hash table, fac un fel de a 2-a baza de date unde pun hash-urile care arata spre indexul real din baza de date
+
+dublezi hash table-ul cand e ocupat cam la 75%
+
+acum ca am implementat hash table-ul pentru foldere, adaugand:
+
+
+
+    int32 *folderhashes;   // Aici avem offseturile folderelor in functie de hashuri
+
+    int32 foldercap;   // Capacitatea folderhashes
+
+    int32 foldernum;  // Numarul de foldere unice
+
+
+
+vreau sa fac functia de adddirpool() unde vreau mai intai sa verific daca un folder deja e in pool la un anumit offset si daca nu e, sa il puna:
+
+
+
+int32 adddirpool(Database *db, int8 *dir) {
+
+    int32 len = strlen($c dir) + 1;
+
+
+
+    int32 h = hashpath(db, dir, db->foldercap);
+
+
+
+    while (db->poolused + len > db->poolcap) {
+
+        db->poolcap *= 2;
+
+        db->pool = $1 realloc(db->pool, db->poolcap);
+
+        assert(db->pool);
+
+        memset($1 (db->pool + db->poolused), 0, (db->poolcap - db->poolused) * sizeof(int8));
+
+    }
+
+
+
+    int32 offset = db->poolused;
+
+    memcpy(db->pool + offset, dir, len);
+
+    db->poolused += len;
+
+
+
+    return offset;
+
+}
