@@ -1,4 +1,11 @@
 #include "database.h"
+#include "../utils/utils.h"
+
+static int32 adddirpool(Database *, int8 *);
+static int32 addfilepool(Database *, int8 *);
+static void dirhashresize(Database *);
+static void filehashresize(Database *);
+static void hashresize(Database *);
 
 int32 hash(int8 *dir, int8 *file, int8 capacity) {
     int32 h = 5381, c;
@@ -100,7 +107,7 @@ void addtodb(Database *db, int8 *dir, int8 *file) {
     ReleaseSRWLockExclusive(&db->lock);
 }
 
-int32 adddirpool(Database *db, int8 *dir) {
+static int32 adddirpool(Database *db, int8 *dir) {
     int32 len = strlen($c dir) + 1;
 
     if (db->foldernum >= db->foldercap * 0.75) {
@@ -124,7 +131,7 @@ int32 adddirpool(Database *db, int8 *dir) {
         db->pool = $1 realloc(db->pool, db->poolcap);
         assert(db->pool);
     }
- 
+
     int32 offset = db->poolused;
     memcpy(db->pool + offset, dir, len);
     db->poolused += len;
@@ -134,7 +141,7 @@ int32 adddirpool(Database *db, int8 *dir) {
     return offset;
 }
 
-int32 addfilepool(Database *db, int8 *file) {
+static int32 addfilepool(Database *db, int8 *file) {
     int32 len = strlen($c file) + 1;
 
     if (db->filenum >= db->filecap * 0.75) {
@@ -168,7 +175,7 @@ int32 addfilepool(Database *db, int8 *file) {
     return offset;
 }
 
-void dirhashresize(Database *db) {
+static void dirhashresize(Database *db) {
     int32 oldcap = db->foldercap;
     db->foldercap *= 2;
     int32 *newfolderhashes = $4 malloc(db->foldercap * sizeof(int32));
@@ -192,7 +199,7 @@ void dirhashresize(Database *db) {
     db->folderhashes = newfolderhashes;
 }
 
-void filehashresize(Database *db) {
+static void filehashresize(Database *db) {
     int32 oldcap = db->filecap;
     db->filecap *= 2;
     int32 *newfilehashes = $4 malloc(db->filecap * sizeof(int32));
@@ -216,7 +223,7 @@ void filehashresize(Database *db) {
     db->filehashes = newfilehashes;
 }
 
-void hashresize(Database *db) {
+static void hashresize(Database *db) {
     db->hashsize *= 2;
     int32 *newindexes = $4 malloc(db->hashsize * sizeof(int32));
     assert(newindexes);

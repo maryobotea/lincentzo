@@ -46,19 +46,7 @@ int32 hashpath(int8 *, int8);
 
 Database *mkdatabase();
 
-bool adddir(Database *, int8 *);
-
 void addtodb(Database *, int8 *, int8 *);
-
-int32 adddirpool(Database *, int8 *);
-
-int32 addfilepool(Database *, int8 *);
-
-void dirhashresize(Database *);
-
-void filehashresize(Database *);
-
-void hashresize(Database *);
 
 void findbypathdb(Database *, int8 *);
 

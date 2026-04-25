@@ -8,7 +8,7 @@ int8 *joinpath(int8 *dir, int8 *file) {
     memcpy(fullpath, dir, lendir);
     fullpath[lendir] = '\\';
     memcpy(fullpath + lendir + 1, file, lenfile);
-    fullpath[lendir + lenfile - 1] = '\0';
+    fullpath[lendir + lenfile + 1] = '\0';
 
     return fullpath;
 }

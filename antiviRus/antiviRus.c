@@ -4,47 +4,23 @@
 #include "../scanfile/scanfile.h"
 #include "../utils/utils.h"
 
-void print_memory_usage() {
-    PROCESS_MEMORY_COUNTERS_EX pmc;
-    if (GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc))) {
-        printf("\n--- Consum Memorie ---\n");
-        printf("RAM Utilizat (Working Set): %zu MB\n", pmc.WorkingSetSize / 1024 / 1024);
-        printf("Memorie Privata: %zu MB\n", pmc.PrivateUsage / 1024 / 1024);
-    }
-}
-
 int main(int argc, char *argv[]) {
-    // 1. Inițializare cu o capacitate mică pentru a forța resize-ul rapid
-    // Pornim cu doar 10 locuri și 20 de sertare hash
-    Database *db = mkdatabase(); 
-    // Dacă mkdatabase are valori fixe mari, le poți lăsa așa, 
-    // dar testul de mai jos va funcționa oricum.
-    print_memory_usage();
-    printf("Incepem testarea...\n");
+    Database *db = mkdatabase();
+    Workqueue *wq = mkqueue(); // 4 threaduri de lucru
+    
+    addtodb(db, (int8 *)"C:\\Users\\Maryo\\Desktop", (int8 *)"Firefox.exe");
+    addtodb(db, (int8 *)"C:\\Users\\Maryo\\AppData\\Roaming\\utorrent", (int8 *)"uTorrent.exe");
+    addtodb(db, (int8 *)"C:\\Cisco 9.0.0\\Cisco Packet Tracer 9.0.0\\bin", (int8 *)"PacketTracer.exe");
+    addtodb(db, (int8 *)"C:\\Users\\Maryo\\Desktop\\MAC", (int8 *)"BON2.pkt");
+    
+    showdb(db);
 
-    char folder[64];
-    char fisier[64];
-    char folder1[64];
-    char fisier1[64];
-    sprintf(folder, "C:\\Wiqqqqqqqqqqqqqqqndows\\System%d", 1); // Multe fisiere in acelasi folder
-    sprintf(fisier, "file_%d.exe", 1);
-    sprintf(folder1, "C:\\Wiqqqqqqqqqqqqqqqndows\\System%d", 2); // Multe fisiere in acelasi folder
-    sprintf(fisier1, "file_%d.exe", 2);
-    // 2. Test Inserare Masivă (Forțăm Resize și Rehash)
-    // Inserăm 1000 de fișiere simulate
-    for (int i = 0; i < 500000; i++) {
-        addtodb(db, (int8 *)folder, (int8 *)fisier);
-        addtodb(db, (int8 *)folder1, (int8 *)fisier1);
-    }
+    pushqueue(wq, 0);
+    pushqueue(wq, 1);
+    pushqueue(wq, 2);
+    pushqueue(wq, 3);
+    
+    printf("%d\n", scanfile(db, wq, 1));
 
-    printf("Inserare completa. Total fisiere: %d\n", db->num);
-    printf("Capacitate curenta: %d, Hash Size: %d\n", db->cap, db->hashsize);
-
-    findbypathdb(db, (int8 *)"C:\\Windows\\System1\\file_1.exe");
-    // 5. Curățenie
-    showdb(db); // Poți comenta această linie dacă lista este prea mare
-    getchar(); // Programul va sta deschis până apeși o tastă
-    destroydb(db);
-    printf("\nTest finalizat cu succes!\n");
     return 0;
 }
