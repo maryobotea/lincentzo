@@ -22,28 +22,23 @@ DWORD WINAPI IteratorWorker(LPVOID lpParam) {
         ReleaseSRWLockShared(&ctx->db->lock);
 
         joinpath(thread_buffer, $1 "*", search_buffer);
-        HANDLE hFind = FindFirstFileA($c search_buffer, &fd);
+        HANDLE hFind = FindFirstFileExA((char*)search_buffer, FindExInfoBasic, &fd, FindExSearchNameMatch, NULL, 0);
 
         if (hFind != INVALID_HANDLE_VALUE) {
             do {
                 if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
 
                 int32 newIndex = addtodb(ctx->db, thread_buffer, $1 fd.cFileName);
-                
                 if (newIndex != -1) {
                     if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-                        
-                        // Verificăm dacă este un director normal sau un portal virtual (Junction Point)
                         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
-                            // Este director normal, il trimitem la explorat!
                             InterlockedIncrement(&ctx->active_tasks);
                             pushqueue(ctx->iterQueue, newIndex);
                         }
-                        // Daca este Reparse Point, a fost adaugat in baza de date,
-                        // dar NU il bagam in coada de iterare ca sa evitam buclele si dublurile.
-                        
-                    } 
-                    // Daca aveai fisiere aici, ele raman logica normala
+                    } else {
+                        InterlockedIncrement(&ctx->active_tasks);
+                        pushqueue(ctx->scanQueue, newIndex);
+                    }
                 }
             } while (FindNextFileA(hFind, &fd) != 0);
             FindClose(hFind);
@@ -69,7 +64,7 @@ DWORD WINAPI ScannerWorker(LPVOID lpParam) {
 
         // Rulăm motorul euristic din scanfile.c
         // Transmițând thread_buffer, eliminăm malloc-ul din interiorul scanării
-        scanfile(ctx->db, ctx->scanQueue, index, thread_buffer);
+        //scanfile(ctx->db, ctx->scanQueue, index, thread_buffer);
 
         InterlockedDecrement(&ctx->active_tasks);
     }
@@ -78,58 +73,106 @@ DWORD WINAPI ScannerWorker(LPVOID lpParam) {
     return 0;
 }
 
-// Funcția de management care coordonează tot sistemul
+
 void startsys(Database *db) {
-    Workqueue *iterQueue = mkqueue();
-    Workqueue *scanQueue = mkqueue(); // Il cream doar ca sa nu dea crash, dar va sta gol
+    // 1. Pregatirea infrastructurii (Cozi mari pentru a evita blocajele de I/O)
+    Workqueue *iterQueue = mkqueue(); 
+    Workqueue *scanQueue = mkqueue();
 
     ThreadWorker *worker = (ThreadWorker *)malloc(sizeof(ThreadWorker));
-    assert(worker);
+    if (!worker) return;
+
     worker->db = db;
     worker->iterQueue = iterQueue;
     worker->scanQueue = scanQueue;
     worker->active_tasks = 0;
 
+    // 2. Calculam resursele CPU (ex: 20 nuclee -> 15 Scannere, 5 Iteratoare)
     SYSTEM_INFO sysInfo;
     GetSystemInfo(&sysInfo);
     int32 numThreads = sysInfo.dwNumberOfProcessors;
     
+    int32 numIterators = numThreads / 4; 
+    if (numIterators < 1) numIterators = 1;
+    int32 numScanners = numThreads - numIterators;
+
     HANDLE *threads = (HANDLE *)malloc(numThreads * sizeof(HANDLE));
     assert(threads);
 
-    printf("[i] Pornire motor de EXPLORARE cu %d thread-uri...\n", numThreads);
+    printf("[i] Configurare dinamica: %d Scannere si %d Iteratoare.\n", numScanners, numIterators);
 
-    // [!!!] PORNIM DOAR ITERATOARE [!!!]
-    for (int i = 0; i < numThreads; i++) {
+    // 3. Pornim Scannerele (Consumatorii)
+    for (int i = 0; i < numScanners; i++) {
+        threads[i] = CreateThread(NULL, 0, ScannerWorker, worker, 0, NULL);
+    }
+
+    // 4. Pornim Iteratoarele (Producatorii)
+    for (int i = numScanners; i < numThreads; i++) {
         threads[i] = CreateThread(NULL, 0, IteratorWorker, worker, 0, NULL);
     }
 
-    // PENTRU TESTARE: In loc de tot C-ul, da-i un folder mic din Windows ca sa vezi daca merge corect si se opreste.
-    // Daca ii dai tot C:\ va printa sute de mii de linii.
-    int32 driveIndex = addtodb(db, (int8*)"", (int8*)"C:\\");
-    
-    if (driveIndex != -1) {
-        InterlockedIncrement(&worker->active_tasks);
-        pushqueue(iterQueue, driveIndex);
+    // 5. DETECTARE DISK-URI (Varianta eficienta propusa de tine)
+    char driveBuffer[256];
+    DWORD length = GetLogicalDriveStringsA(sizeof(driveBuffer), driveBuffer);
+
+    if (length > 0 && length < sizeof(driveBuffer)) {
+        char *currentDrive = driveBuffer;
+        while (*currentDrive) {
+            UINT driveType = GetDriveTypeA(currentDrive);
+            
+            // Scanăm doar unități fixe (SSD/HDD) sau stick-uri USB
+            if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
+                printf("[i] Detectat disk: %s - Se adauga la scanare...\n", currentDrive);
+                
+                // Adăugăm rădăcina în baza de date
+                int32 driveIndex = addtodb(db, (int8*)"", (int8*)currentDrive);
+                if (driveIndex != -1) {
+                    // Marcam task-ul inainte de push ca sa nu avem race conditions
+                    InterlockedIncrement(&worker->active_tasks);
+                    pushqueue(iterQueue, driveIndex);
+                }
+            }
+            // Trecem la următorul string din buffer (formatul este X:\0Y:\0\0)
+            currentDrive += strlen(currentDrive) + 1;
+        }
     }
 
-    // ASTEPTAM SA TERMINE
-    Sleep(100); 
-    while (InterlockedAdd(&worker->active_tasks, 0) > 0) {
-        Sleep(50); 
+    // 6. MONITORIZARE SI ASTEPTARE
+    // Lăsăm un mic delay să se populeze cozile
+    Sleep(200); 
+
+    while (1) {
+        long pending = InterlockedAdd(&worker->active_tasks, 0);
+        
+        // Afișăm progresul pe o singură linie care se updatează
+        printf("\r[*] Analiza in curs... Task-uri active: %-8ld | Elemente DB: %-8d", pending, db->num);
+        fflush(stdout);
+
+        if (pending <= 0) {
+            // Re-verificăm după o scurtă pauză pentru a fi siguri că nu e doar latență de disc
+            Sleep(300);
+            if (InterlockedAdd(&worker->active_tasks, 0) <= 0) break;
+        }
+        Sleep(200);
     }
 
-    // OPRIM MUNCITORII
+    // 7. SEMNALIZARE OPRIRE (Trimitere -1 pentru a elibera thread-urile din popqueue)
     for (int i = 0; i < numThreads; i++) {
         pushqueue(iterQueue, -1);
+        pushqueue(scanQueue, -1);
     }
 
+    // Așteptăm sincronizarea finală a tuturor firelor de execuție
     WaitForMultipleObjects(numThreads, threads, TRUE, INFINITE);
-    printf("\n[+] Gata! Arborele de foldere a fost mapat complet.\n");
+    
+    printf("\n\n[+] Scanare finalizata cu succes pe toate unitatile.\n");
 
-    for (int i = 0; i < numThreads; i++) CloseHandle(threads[i]);
+    // 8. CURATENIE
+    for (int i = 0; i < numThreads; i++) {
+        CloseHandle(threads[i]);
+    }
+    free(threads);
     destroyqueue(iterQueue);
     destroyqueue(scanQueue);
-    free(threads);
     free(worker);
 }

@@ -6,47 +6,57 @@
 #include "../utils/utils.h"
 
 int main(int argc, char *argv[]) {
+    // Spunem Windows-ului sa nu ne mai blocheze cu popup-uri ascunse
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+
     printf("================================================\n");
-    printf("   ANTIVIRUS ENGINE - TESTARE MULTITHREADING    \n");
+    printf("   TEST SUPREM: INDEXARE C:\\ SI INTEROGARE DB  \n");
     printf("================================================\n\n");
 
-    // 1. Creăm baza de date (String Pool + Hash Table)
-    printf("[*] Initializare baza de date...\n");
     Database *db = mkdatabase();
-    if (!db) {
-        printf("[!] Eroare: Nu s-a putut aloca memoria pentru baza de date.\n");
-        return 1;
-    }
 
-    // 2. Pornim motorul de scanare!
-    // startsys va prelua controlul, va porni thread-urile, va detecta 
-    // disk-urile si va afisa telemetria pe ecran datorita printf-urilor adaugate.
-    startsys(db);
+    // 1. Pornim explorarea pe C:\ (Foloseste varianta de startsys DOAR cu Iteratoare!)
+    startsys(db); 
 
     printf("\n================================================\n");
-    printf("[+] MAPARE FINALIZATA CU SUCCES!\n");
-    printf("[*] Total elemente (fisiere/foldere) gasite: %d\n", db->num);
-    printf("================================================\n");
+    printf("[+] MAPARE FINALIZATA! Baza de date a indexat %d elemente.\n", db->num);
+    printf("================================================\n\n");
 
-    // Afisam DOAR primele 20 ca sa ne demonstram ca e corect
-    printf("Primele 20 de elemente gasite:\n");
-    AcquireSRWLockShared(&db->lock);
-    for (int i = 0; i < 20 && i < db->num; i++) {
-        if (!db->entries[i].deleted) {
-            int8 *d = $1 (db->pool + db->entries[i].diroffset);
-            int8 *f = $1 (db->pool + db->entries[i].fileoffset);
-            printf("[%d] %s\\%s\n", i, d, f);
-        }
-    }
-    ReleaseSRWLockShared(&db->lock);
+    // 2. TESTAM CAUTAREA IN BAZA DE DATE (O(1) pe 800.000+ elemente)
+    printf("[*] TESTAM HASH-UL: Cautam fisiere critice din Windows...\n");
+    
+    // Aceste fisiere exista 100% pe orice Windows
+    int8 *target1 = (int8 *)"C:\\Windows\\explorer.exe";
+    int8 *target2 = (int8 *)"C:\\Windows\\System32\\cmd.exe";
+    int8 *target3 = (int8 *)"C:\\Windows\\System32\\notepad.exe";
+    // Un fisier care nu exista
+    int8 *target_fake = (int8 *)"C:\\Windows\\System32\\fisier_fals_12345.exe";
 
-    // 4. Curatenie (prevenim memory leaks)
+    printf("\n-> Cautam: %s\n", (char*)target1);
+    findbypathdb(db, target1);
+
+    printf("\n-> Cautam: %s\n", (char*)target2);
+    findbypathdb(db, target2);
+
+    printf("\n-> Cautam: %s\n", (char*)target3);
+    findbypathdb(db, target3);
+
+    printf("\n-> Cautam FALS: %s\n", (char*)target_fake);
+    findbypathdb(db, target_fake);
+
+    // 3. TESTAM STERGEREA (Lazy Pop)
+    printf("\n[*] TEST STERGERE: Eliminam cmd.exe din baza de date...\n");
+    lazypopfromdb(db, target2);
+    
+    printf("-> Cautam din nou: %s\n", (char*)target2);
+    findbypathdb(db, target2); // Acum ar trebui sa zica "Not Found"
+
+
     printf("\n[*] Eliberare memorie...\n");
     destroydb(db);
 
-    // 5. Pauza ca sa poti analiza output-ul inainte sa se inchida consola
-    printf("\nProgram incheiat cu succes. Apasa ENTER pentru iesire...");
+    printf("\nProgram incheiat. Apasa ENTER pentru iesire...");
+    getchar();
 
     return 0;
 }

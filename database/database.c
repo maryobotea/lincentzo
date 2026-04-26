@@ -8,11 +8,13 @@ static void filehashresize(Database *);
 static void hashresize(Database *);
 
 int32 hash(int8 *dir, int8 *file, int32 capacity) {
-    int32 h = 5381, c;
+    int32 h = 5381; 
+    int32 c;
     int32 lendir = strlen((char*)dir);
 
     int8 *p = dir;
     while ((c = *p++)) {
+        if (c >= 'a' && c <= 'z') c -= 32;
         h = ((h << 5) + h) + c;
     }
 
@@ -24,6 +26,7 @@ int32 hash(int8 *dir, int8 *file, int32 capacity) {
 
     p = file;
     while ((c = *p++)) {
+        if (c >= 'a' && c <= 'z') c -= 32;
         h = ((h << 5) + h) + c;
     }
     
@@ -36,7 +39,6 @@ int32 hashpath(int8 *path, int32 capacity) {
 
     while ((c = *path++)) {
         if (c >= 'a' && c <= 'z') c -= 32; 
-        
         h = ((h << 5) + h) + c;
     }
 
@@ -273,7 +275,7 @@ void findbypathdb(Database *db, int8 *path) {
         int8 *filename = $1 (db->pool + e->fileoffset);
 
         joinpath(dirpath, filename, fullpath);
-        printf("Compar: [%s] cu [%s]\n", (char*)fullpath, (char*)path); // DEBUG
+        printf("Compar: [%s] cu [%s]\n", (char*)fullpath, (char*)path); 
 
         if (strcmp($1 fullpath, $1 path) == 0) {
             printf("Found at index %d: %s\\%s\n", i, dirpath, filename);
