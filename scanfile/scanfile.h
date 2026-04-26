@@ -41,4 +41,4 @@ typedef struct report ScanReport;
 
 double calculate_entropy(int8*, int32);
 
-int32 scanfile(Database *, Workqueue *, int32);
+int32 scanfile(Database *, Workqueue *, int32, int8 *);

@@ -1,10 +1,12 @@
 #include "scanfile.h"
 #include "../antiviRus/antiviRus.h"
 #include "../utils/utils.h"
+#include <math.h>
 
 #define LN2 0.693147180559945309417
 
-inline double fast_log2(double x) {
+static inline double fast_log2(double x) {
+    if (x <= 0) return 0;
     return log(x) / LN2;
 }
 
@@ -38,6 +40,15 @@ double calculate_entropy(int8* data, int32 size) {
     }
 
     return entropy;
+}
+
+static int32 rva_to_offset(IMAGE_SECTION_HEADER* sec, int32 numSections, int32 rva) {
+    for (int i = 0; i < numSections; i++) {
+        if (rva >= sec[i].VirtualAddress && rva < (sec[i].VirtualAddress + sec[i].Misc.VirtualSize)) {
+            return (rva - sec[i].VirtualAddress) + sec[i].PointerToRawData;
+        }
+    }
+    return -1;
 }
 
 static void check_trailing_dots_imports(unsigned char* pFile, IMAGE_NT_HEADERS* nt, ScanReport* r, int32 fileSize) {
@@ -639,21 +650,25 @@ static void check_overlay(unsigned char* pFile, IMAGE_DOS_HEADER* dos, IMAGE_NT_
 //     return currentResult;
 // }
 
-int32 scanfile(Database *db, Workqueue *wq, int32 indexq) {
-    // --- Pregătire căi și handle-uri ---
+int32 scanfile(Database *db, Workqueue *wq, int32 indexq, int8 *thread_buffer) {
     AcquireSRWLockShared(&db->lock);
-    int8 *fullpath = joinpath(db->pool + db->entries[indexq].diroffset, db->pool + db->entries[indexq].fileoffset);
+    int8 *dirpath = db->pool + db->entries[indexq].diroffset;
+    int8 *filename = db->pool + db->entries[indexq].fileoffset;
+    
+    joinpath(dirpath, filename, thread_buffer);
     ReleaseSRWLockShared(&db->lock);
-    if (!fullpath) return 0;
 
     ScanReport fileReport = { ANOMALY_NONE, 0, 0.0 };
 
-    HANDLE hFile = CreateFileA((char*)fullpath, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) { free(fullpath); return 1; }
+    HANDLE hFile = CreateFileA((char*)thread_buffer, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    
+    if (hFile == INVALID_HANDLE_VALUE) { 
+        return 1; 
+    }
 
     LARGE_INTEGER size;
     GetFileSizeEx(hFile, &size);
-    int32 finalResult = 10; 
+    int32 finalResult = 10;
 
     // --- Mapping ---
     HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
@@ -690,7 +705,7 @@ int32 scanfile(Database *db, Workqueue *wq, int32 indexq) {
                                 check_trailing_dots_imports(pFile, nt, &fileReport, (int32)size.QuadPart);
                             }
                             // 3. Verificăm TLS (folosind rezultatul de la secțiuni pentru context)
-                            finalResult = check_tls_presence(nt, finalResult);
+                            //finalResult = check_tls_presence(nt, finalResult);
                         } else {
                             finalResult = 668; // Out of bounds
                         }
@@ -705,6 +720,5 @@ int32 scanfile(Database *db, Workqueue *wq, int32 indexq) {
     }
 
     CloseHandle(hFile);
-    free(fullpath);
     return finalResult;
 }

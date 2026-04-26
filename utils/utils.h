@@ -1,3 +1,3 @@
 #include "../antiviRus/antiviRus.h"
 
-int8 *joinpath(int8 *, int8 *);
+void joinpath(int8 *, int8 *, int8 *);

@@ -40,13 +40,13 @@ struct s_database {
 
 typedef struct s_database Database;
 
-int32 hash(int8 *, int8 *, int8);
+int32 hash(int8 *, int8 *, int32);
 
-int32 hashpath(int8 *, int8);
+int32 hashpath(int8 *, int32);
 
 Database *mkdatabase();
 
-void addtodb(Database *, int8 *, int8 *);
+int32 addtodb(Database *, int8 *, int8 *);
 
 void findbypathdb(Database *, int8 *);
 

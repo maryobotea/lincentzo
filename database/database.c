@@ -7,26 +7,36 @@ static void dirhashresize(Database *);
 static void filehashresize(Database *);
 static void hashresize(Database *);
 
-int32 hash(int8 *dir, int8 *file, int8 capacity) {
+int32 hash(int8 *dir, int8 *file, int32 capacity) {
     int32 h = 5381, c;
+    int32 lendir = strlen((char*)dir);
 
-    while ((c = *dir++)) {
+    int8 *p = dir;
+    while ((c = *p++)) {
         h = ((h << 5) + h) + c;
     }
 
-    h = ((h << 5) + h) + '\\';
+    if (lendir > 0) {
+        if (dir[lendir - 1] != '\\') {
+            h = ((h << 5) + h) + '\\';
+        }
+    }
 
-    while ((c = *file++)) {
+    p = file;
+    while ((c = *p++)) {
         h = ((h << 5) + h) + c;
     }
     
     return h % capacity;
 }
 
-int32 hashpath(int8 *path, int8 capacity) {
-    int32 h = 5381, c;
+int32 hashpath(int8 *path, int32 capacity) {
+    int32 h = 5381;
+    int32 c;
 
     while ((c = *path++)) {
+        if (c >= 'a' && c <= 'z') c -= 32; 
+        
         h = ((h << 5) + h) + c;
     }
 
@@ -79,7 +89,7 @@ Database *mkdatabase() {
     return db;
 }
 
-void addtodb(Database *db, int8 *dir, int8 *file) {
+int32 addtodb(Database *db, int8 *dir, int8 *file) {
     AcquireSRWLockExclusive(&db->lock);
     if (db->num >= db->cap) {
         db->cap *= 2; 
@@ -105,6 +115,8 @@ void addtodb(Database *db, int8 *dir, int8 *file) {
     db->num++;
 
     ReleaseSRWLockExclusive(&db->lock);
+
+    return i;
 }
 
 static int32 adddirpool(Database *db, int8 *dir) {
@@ -245,42 +257,42 @@ static void hashresize(Database *db) {
 }
 
 void findbypathdb(Database *db, int8 *path) {
-    AcquireSRWLockShared(&db->lock);
+    int8 *fullpath = (int8 *)malloc(32768);
+    assert(fullpath);   
 
+    AcquireSRWLockShared(&db->lock);
     int32 h = hashpath(path, db->hashsize);
     int32 i = db->hashindexes[h];
     bool found = false;
+    
     while (i != -1) {
         Entry *e = &db->entries[i];
-        if (e->deleted) {
-            i = db->nodes[i].next;
-            continue;
-        }
+        if (e->deleted) { i = db->nodes[i].next; continue; }
+        
         int8 *dirpath = $1 (db->pool + e->diroffset);
         int8 *filename = $1 (db->pool + e->fileoffset);
 
-        int8 *fullpath;
-        fullpath = joinpath($1 dirpath, $1 filename);
+        joinpath(dirpath, filename, fullpath);
+        printf("Compar: [%s] cu [%s]\n", (char*)fullpath, (char*)path); // DEBUG
 
-        if (fullpath) {
-            if (strcmp($1 fullpath, $1 path) == 0) {
-                printf("Found at index %d: %s\\%s\n", i, dirpath, filename);
-                found = true;
-                free(fullpath);
-                break;
-            }
-            free(fullpath);
+        if (strcmp($1 fullpath, $1 path) == 0) {
+            printf("Found at index %d: %s\\%s\n", i, dirpath, filename);
+            found = true;
+            break;
         }
         i = db->nodes[i].next;
     }
 
-    if (!found) {
-        printf("Not Found: %s\n", path);
-    }
+    if (!found) printf("Not Found: %s\n", path);
     ReleaseSRWLockShared(&db->lock);
+    
+    free(fullpath); 
 }
 
 void lazypopfromdb(Database *db, int8 *path) {
+    int8 *fullpath = (int8 *)malloc(32768);
+    assert(fullpath);   
+
     AcquireSRWLockExclusive(&db->lock);
 
     int32 h = hashpath(path, db->hashsize);
@@ -293,10 +305,9 @@ void lazypopfromdb(Database *db, int8 *path) {
             int8 *dirpath = $1 (db->pool + e->diroffset);
             int8 *filename = $1 (db->pool + e->fileoffset);
 
-            int8 *fullpath;
-            fullpath = joinpath($1 dirpath, $1 filename);
+            joinpath($1 dirpath, $1 filename, fullpath);
     
-            if (fullpath && strcmp($1 fullpath, $1 path) == 0) {
+            if (strcmp($1 fullpath, $1 path) == 0) {
                 if (prev == -1) 
                     db->hashindexes[h] = db->nodes[i].next;
                 else 
@@ -304,40 +315,49 @@ void lazypopfromdb(Database *db, int8 *path) {
 
                 e->deleted = true;
                 db->num--;  
-                free(fullpath);
+                
                 break;
             }
-            
-            if(fullpath) free(fullpath);
         }
         prev = i;
         i = db->nodes[i].next;
     }
     ReleaseSRWLockExclusive(&db->lock);
+
+    free(fullpath);
 }
 
 void showdb(Database *db) {
+    if (!db) return;
     AcquireSRWLockShared(&db->lock);
-    if (!db || db->num == 0) {
-        printf("Empty.\n");
-        ReleaseSRWLockShared(&db->lock);
-        return;
-    }
 
-    printf("--- (%d Files) ---\n", db->num);
-    
+    // Setăm un buffer mare de scriere pentru stdout (64KB)
+    // Asta reduce apelurile de sistem către Windows
+    char buffer[65536];
+    setvbuf(stdout, buffer, _IOFBF, sizeof(buffer));
+
     for (int32 i = 0; i < db->num; i++) {
         Entry *e = &db->entries[i];
-        
-        if(!e->deleted) {
-            int8 *dirpath = $1 (db->pool + e->diroffset);
-            int8 *filename = $1 (db->pool + e->fileoffset);
+        if (!e->deleted) {
+            char *dir = $c (db->pool + e->diroffset);
+            char *file = $c (db->pool + e->fileoffset);
 
-            printf("[%d] %s\\%s (%llu bytes)\n", i, dirpath, filename);
+            // Verificăm doar dacă punem slash-ul sau nu
+            // Fără memcpy, fără strlen, fără buffer intermediar
+            if (*dir != '\0') {
+                fputs(dir, stdout);
+                // Punem slash doar dacă dir nu se termină deja în el
+                if (dir[strlen(dir) - 1] != '\\') {
+                    fputc('\\', stdout);
+                }
+            }
+            fputs(file, stdout);
+            fputc('\n', stdout);
         }
     }
-    
-    printf("--- End ---\n");
+
+    fflush(stdout);
+    setvbuf(stdout, NULL, _IOLBF, BUFSIZ);
     ReleaseSRWLockShared(&db->lock);
 }
 
