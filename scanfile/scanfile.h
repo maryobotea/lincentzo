@@ -27,6 +27,11 @@ enum flags {
     ANOMALY_EMBEDDED_PE       = 1 << 20,   // 0x100000
     ANOMALY_ENTR_OVERLAY      = 1 << 21,   // 0x200000
     ANOMALY_NOP_SLED          = 1 << 22,   // 0x400000
+    ANOMALY_CRYPTO_IMPORTS    = 1 << 23,   // 0x2000000
+    ANOMALY_INJECT_IMPORTS    = 1 << 24,   // 0x4000000
+    ANOMALY_YARA_MATCH        = 1 << 25,   // 0x8000000
+    FLAG_KNOWN_PACKER         = 1 << 26,
+    FLAG_KNOWN_INSTALLER      = 1 << 27,
 };
 
 typedef enum flags AnomalyFlags;

@@ -8,6 +8,9 @@
 #include <errno.h>
 #include <windows.h>
 #include <psapi.h>
+#include <math.h>
+#include <wintrust.h>
+#include <softpub.h>
 
 typedef unsigned char int8;
 typedef unsigned short int int16;

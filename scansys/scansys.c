@@ -64,7 +64,7 @@ DWORD WINAPI ScannerWorker(LPVOID lpParam) {
 
         // Rulăm motorul euristic din scanfile.c
         // Transmițând thread_buffer, eliminăm malloc-ul din interiorul scanării
-        //scanfile(ctx->db, ctx->scanQueue, index, thread_buffer);
+        scanfile(ctx->db, ctx->scanQueue, index, thread_buffer);
 
         InterlockedDecrement(&ctx->active_tasks);
     }
@@ -115,27 +115,13 @@ void startsys(Database *db) {
     char driveBuffer[256];
     DWORD length = GetLogicalDriveStringsA(sizeof(driveBuffer), driveBuffer);
 
-    if (length > 0 && length < sizeof(driveBuffer)) {
-        char *currentDrive = driveBuffer;
-        while (*currentDrive) {
-            UINT driveType = GetDriveTypeA(currentDrive);
-            
-            // Scanăm doar unități fixe (SSD/HDD) sau stick-uri USB
-            if (driveType == DRIVE_FIXED || driveType == DRIVE_REMOVABLE) {
-                printf("[i] Detectat disk: %s - Se adauga la scanare...\n", currentDrive);
-                
-                // Adăugăm rădăcina în baza de date
-                int32 driveIndex = addtodb(db, (int8*)"", (int8*)currentDrive);
+    int32 driveIndex = addtodb(db, (int8*)"", (int8*)"C:\\Users\\Sn0ke\\Desktop\\theZoo");
                 if (driveIndex != -1) {
                     // Marcam task-ul inainte de push ca sa nu avem race conditions
                     InterlockedIncrement(&worker->active_tasks);
                     pushqueue(iterQueue, driveIndex);
                 }
-            }
-            // Trecem la următorul string din buffer (formatul este X:\0Y:\0\0)
-            currentDrive += strlen(currentDrive) + 1;
-        }
-    }
+
 
     // 6. MONITORIZARE SI ASTEPTARE
     // Lăsăm un mic delay să se populeze cozile
