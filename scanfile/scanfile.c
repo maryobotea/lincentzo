@@ -1,10 +1,48 @@
 #include "scanfile.h"
-#include "../antiviRus/antiviRus.h"
+// #include "../antiviRus/antiviRus.h" // Decomentează dacă structurile ScanReport sunt aici
 #include "../utils/utils.h"
 #include <math.h>
+#include <stdio.h>
 
 #define LN2 0.693147180559945309417
 
+// ========================================================================
+// HELPERS PENTRU ARHITECTURA PE32 / PE64 (Pentru citire corectă din header)
+// ========================================================================
+static inline ULONGLONG GetImageBase(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.ImageBase : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.ImageBase;
+}
+static inline DWORD GetFileAlignment(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.FileAlignment : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.FileAlignment;
+}
+static inline DWORD GetSectionAlignment(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.SectionAlignment : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.SectionAlignment;
+}
+static inline DWORD GetSizeOfImage(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.SizeOfImage : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.SizeOfImage;
+}
+static inline DWORD GetSizeOfHeaders(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.SizeOfHeaders : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.SizeOfHeaders;
+}
+static inline DWORD GetSubsystem(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.Subsystem : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.Subsystem;
+}
+static inline DWORD GetWin32VersionValue(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.Win32VersionValue : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.Win32VersionValue;
+}
+static inline DWORD GetNumberOfRvaAndSizes(IMAGE_NT_HEADERS* nt) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.NumberOfRvaAndSizes : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.NumberOfRvaAndSizes;
+}
+static inline DWORD GetDirRVA(IMAGE_NT_HEADERS* nt, int entry) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.DataDirectory[entry].VirtualAddress : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.DataDirectory[entry].VirtualAddress;
+}
+static inline DWORD GetDirSize(IMAGE_NT_HEADERS* nt, int entry) {
+    return (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) ? ((IMAGE_NT_HEADERS64*)nt)->OptionalHeader.DataDirectory[entry].Size : ((IMAGE_NT_HEADERS32*)nt)->OptionalHeader.DataDirectory[entry].Size;
+}
+
+// ========================================================================
+// UTILS & MATH
+// ========================================================================
 static inline double fast_log2(double x) {
     if (x <= 0) return 0;
     return log(x) / LN2;
@@ -25,7 +63,7 @@ double calculate_entropy(int8* data, int32 size) {
     }
 
     for (int32 i = 0; i < size; i += step) {
-        counts[data[i]]++;
+        counts[(unsigned char)data[i]]++;
         total_samples++;
     }
 
@@ -51,16 +89,19 @@ static int32 rva_to_offset(IMAGE_SECTION_HEADER* sec, int32 numSections, int32 r
     return -1;
 }
 
+// ========================================================================
+// HEURISTICI
+// ========================================================================
+
 static void check_trailing_dots_imports(unsigned char* pFile, IMAGE_NT_HEADERS* nt, ScanReport* r, int32 fileSize) {
     IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
     int32 numSections = nt->FileHeader.NumberOfSections;
 
-    int32 importRVA = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    int32 importRVA = GetDirRVA(nt, IMAGE_DIRECTORY_ENTRY_IMPORT);
     if (importRVA == 0) return;
 
     int32 importOffset = rva_to_offset(sec, numSections, importRVA);
-    if (importOffset == -1 || 
-        importOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) > fileSize) return;
+    if (importOffset == -1 || importOffset + sizeof(IMAGE_IMPORT_DESCRIPTOR) > fileSize) return;
 
     IMAGE_IMPORT_DESCRIPTOR* imp = (IMAGE_IMPORT_DESCRIPTOR*)(pFile + importOffset);
 
@@ -99,13 +140,14 @@ static void check_trailing_dots_imports(unsigned char* pFile, IMAGE_NT_HEADERS* 
 }
 
 // Verifică malformații în Optional Header (Win32Version, EntryPoint, Alignment)
-static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanReport* r) {
+static void check_header_malformations(unsigned char* pFile, IMAGE_NT_HEADERS* nt, ScanReport* r) {
 
     IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)pFile;
+    
     // 1. Win32VersionValue — rezervat, trebuie sa fie 0
     // Daca e setat, malware-ul suprascrie informatii de versiune din PEB
     // Folosit pentru a sparge emulatori care citesc versiunea din header
-    if (nt->OptionalHeader.Win32VersionValue != 0)
+    if (GetWin32VersionValue(nt) != 0)
         r->totalScore += 40;
 
     // 2. AddressOfEntryPoint == 0 pe EXE
@@ -118,7 +160,7 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // 3. FileAlignment invalid
     // Trebuie sa fie putere a lui 2 si minim 512
     // Daca nu e, loader-ul se comporta impredictibil
-    int32 fAlign = nt->OptionalHeader.FileAlignment;
+    DWORD fAlign = GetFileAlignment(nt);
     if (fAlign < 512 || (fAlign & (fAlign - 1)) != 0)
         r->totalScore += 30;
 
@@ -130,7 +172,7 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
         r->totalScore += 40;
 
     // 5. SectionAlignment invalid
-    int32 sAlign = nt->OptionalHeader.SectionAlignment;
+    DWORD sAlign = GetSectionAlignment(nt);
 
     // SectionAlignment trebuie sa fie >= FileAlignment
     if (sAlign < fAlign)
@@ -147,7 +189,8 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // 6. SizeOfImage nealiniat la SectionAlignment
     // Windows loader refuza sa incarce fisierul daca nu e aliniat
     // Daca totusi ruleaza, loader-ul a corectat valoarea = comportament nedocumentat
-    if (sAlign != 0 && nt->OptionalHeader.SizeOfImage % sAlign != 0)
+    DWORD sizeOfImage = GetSizeOfImage(nt);
+    if (sAlign != 0 && sizeOfImage % sAlign != 0)
         r->totalScore += 25;
 
     // 7. Dual PE Header
@@ -162,24 +205,24 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // Daca SizeOfHeaders e mai mic decat minimul real = Dual PE Header trick
     // Header-ul din memorie e diferit de cel de pe disc
     // Tools statice vad alte importuri/exporturi decat cele folosite la runtime
-    if (nt->OptionalHeader.SizeOfHeaders < minHeaderSize) {
+    if (GetSizeOfHeaders(nt) < minHeaderSize) {
         r->totalScore += 60;
     }
 
     // 8. ImageBase invalid
     // Zero = loader-ul rebazeza la 0x10000, sparge emulatori
     // Nu e multiplu de 0x10000 = malformatie clara
+    ULONGLONG imageBase = GetImageBase(nt);
     if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
-    // Pe PE64 ImageBase poate fi mult mai mare — doar verificam alinierea
-        if (nt->OptionalHeader.ImageBase % 0x10000 != 0)
+        // Pe PE64 ImageBase poate fi mult mai mare — doar verificam alinierea
+        if (imageBase % 0x10000 != 0)
             r->totalScore += 30;
     } else {
         // Pe PE32 ImageBase > 0x80000000 = rebazare fortata
-        if (nt->OptionalHeader.ImageBase == 0 ||
-            nt->OptionalHeader.ImageBase % 0x10000 != 0)
+        if (imageBase == 0 || imageBase % 0x10000 != 0)
             r->totalScore += 30;
 
-        if (nt->OptionalHeader.ImageBase + nt->OptionalHeader.SizeOfImage >= 0x80000000)
+        if (imageBase + sizeOfImage >= 0x80000000)
             r->totalScore += 30;
     }
 
@@ -193,7 +236,7 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // 10. Subsystem invalid
     // 0 = nedefinit, > 14 = valoare necunoscuta
     // Unele emulatori refuza sa ruleze fisiere cu subsystem invalid
-    int32 subsys = nt->OptionalHeader.Subsystem;
+    DWORD subsys = GetSubsystem(nt);
     if (subsys == 0 || subsys > 14)
         r->totalScore += 25;
 
@@ -201,7 +244,7 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // Spec-ul spune ca trebuie sa fie 16
     // Daca e mai mic, unele DataDirectory entries sunt ascunse de parsere
     // Daca e mai mare, parsere pot citi memorie invalida
-    if (nt->OptionalHeader.NumberOfRvaAndSizes != 16)
+    if (GetNumberOfRvaAndSizes(nt) != 16)
         r->totalScore += 25;
 
     // 12. IMAGE_FILE_DLL si IMAGE_FILE_EXECUTABLE_IMAGE setate simultan = contradictie
@@ -218,14 +261,11 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // Parsere pot sari structura, loader-ul o citeste oricum
     // Tehnica pentru a ascunde importuri/exporturi de analizoare statice
     for (int i = 0; i < 16; i++) {
-    int32 rva  = nt->OptionalHeader.DataDirectory[i].VirtualAddress;
-    int32 size = nt->OptionalHeader.DataDirectory[i].Size;
+        DWORD rva  = GetDirRVA(nt, i);
+        DWORD dirSize = GetDirSize(nt, i);
 
-    if (rva != 0 && size == 0)
-        r->totalScore += 30;
-
-    if (rva == 0 && size != 0)
-        r->totalScore += 30;
+        if (rva != 0 && dirSize == 0) r->totalScore += 30;
+        if (rva == 0 && dirSize != 0) r->totalScore += 30;
     }
 
     // 15. SizeOfImage trebuie sa fie cel putin cat ultima sectiune + VirtualAddress
@@ -236,14 +276,13 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
         int32 end = sec[i].VirtualAddress + sec[i].Misc.VirtualSize;
         if (end > lastVA) lastVA = end;
     }
-    if (nt->OptionalHeader.SizeOfImage < lastVA)
+    if (sizeOfImage < lastVA)
         r->totalScore += 40;
 
-    //16. SizeOfOptionalHeader prea mic = Collapsed Optional Header
+    // 16. SizeOfOptionalHeader prea mic = Collapsed Optional Header
     // Section Table se suprapune cu Optional Header
     // Tools nu pot parsa DataDirectory, importuri, exporturi
     int32 sizeOfOptHeader = nt->FileHeader.SizeOfOptionalHeader;
-
     if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
         // PE64 — marimea normala e 240 bytes
         if (sizeOfOptHeader < sizeof(IMAGE_OPTIONAL_HEADER64) || sizeOfOptHeader > sizeof(IMAGE_OPTIONAL_HEADER64))
@@ -254,13 +293,13 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
             r->totalScore += 50;
     }
 
-    //17. Writeable PE File Header
+    // 17. Writeable PE File Header
     if (fAlign == sAlign && fAlign <= 0x200 && fAlign > 0) {
         r->totalScore += 40;
     }
 
     // 18. Exporturi vs DLL flag
-    int32 hasExports = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress != 0;
+    int32 hasExports = GetDirRVA(nt, IMAGE_DIRECTORY_ENTRY_EXPORT) != 0;
 
     // Exporturi fara flag DLL — posibil compilator vechi, scor mic
     if (hasExports && !isDLL)
@@ -269,7 +308,6 @@ static void check_header_malformations(int8 * pFile, IMAGE_NT_HEADERS* nt, ScanR
     // DLL fara exporturi — poate fi DLL de resurse, scor foarte mic
     if (!hasExports && isDLL)
         r->totalScore += 10;
-
 }
 
 // Verifică anomaliile la nivel de secțiune (RWE, Inflation)
@@ -277,8 +315,11 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
     int numSections = nt->FileHeader.NumberOfSections;
     IMAGE_SECTION_HEADER* sec = IMAGE_FIRST_SECTION(nt);
     int32 ep = nt->OptionalHeader.AddressOfEntryPoint;
-    int32 fAlign = nt->OptionalHeader.FileAlignment;
-    int32 sAlign = nt->OptionalHeader.SectionAlignment;
+    
+    DWORD fAlign = GetFileAlignment(nt);
+    DWORD sAlign = GetSectionAlignment(nt);
+    DWORD sizeOfHeaders = GetSizeOfHeaders(nt);
+
     int32 epFound = 0;
     int32 execSections = 0;
     int32 readableSections = 0;
@@ -301,25 +342,25 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
         for (int32 k = 0; k < 8; k++) {
             int8 c = sec[i].Name[k];
 
-            if (c == 0)            { foundNull = 1; continue; }
-            if (foundNull)           hasBadNull     = 1;
+            if (c == 0)             { foundNull = 1; continue; }
+            if (foundNull)          hasBadNull     = 1;
             if (c < 32 || c > 126)  hasBinaryChars = 1;
-            if (c != first)          allSame        = 0;
+            if (c != first)         allSame        = 0;
         }
 
         if (hasBinaryChars || hasBadNull) {
             r->flags |= ANOMALY_SUSP_NAME;
             r->totalScore += 80;
         } else if (allSame && first != 0) {
-            //Scor mic, dar e totuși suspect ca toate caracterele să fie la fel (ex: "AAAAAAAA") - unele packere fac asta intenționat pentru a îngreuna analiza
+            // Scor mic, dar e totuși suspect ca toate caracterele să fie la fel (ex: "AAAAAAAA") - unele packere fac asta intenționat pentru a îngreuna analiza
         } else if (first == 0 && (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) {
             r->totalScore += 15;
-            //Scor mic, dar e totuși suspect ca o secțiune executabilă să nu aibă nume (deși unele packere fac asta intenționat pentru a îngreuna analiza)
+            // Scor mic, dar e totuși suspect ca o secțiune executabilă să nu aibă nume (deși unele packere fac asta intenționat pentru a îngreuna analiza)
         }
 
         // --- C. Hidden Disk Data (RSize > VSize) ---
         if (rSize > vSize) {
-        int32 diff = rSize - vSize;
+            int32 diff = rSize - vSize;
 
             if (diff > 8) {
                 if (diff > 4096) {
@@ -328,7 +369,7 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
                     r->totalScore += 80;
                 } else {
                     // Cavitate mica — scanam fiecare byte
-                    int8* caveStart = pFile + pRaw + vSize;
+                    int8* caveStart = (int8*)(pFile + pRaw + vSize);
                     for (int32 j = 0; j < diff; j++) {
                         if (caveStart[j] != 0x00 && caveStart[j] != 0x90 && caveStart[j] != 0xCC) {
                             r->flags |= ANOMALY_HIDDEN_D_DISC;
@@ -358,7 +399,7 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
 
         if (epInCave) {
             r->flags |= ANOMALY_EP_IN_CAVE;
-            //scor mare, deoarece un EP care cade într-o cavitate pe disc e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
+            // scor mare, deoarece un EP care cade într-o cavitate pe disc e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
         }
 
         // --- E. Entropie ---
@@ -366,7 +407,7 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
         if (vSize == 0 && (charact & IMAGE_SCN_MEM_EXECUTE)) {
             if (!(r->flags & ANOMALY_EMPTY_SEC)) 
                 r->flags |= ANOMALY_EMPTY_SEC;
-            //scor mare, deoarece o secțiune executabilă fără spațiu virtual e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
+            // scor mare, deoarece o secțiune executabilă fără spațiu virtual e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
         }
 
         if (sec[i].SizeOfRawData == 0 || sec[i].PointerToRawData == 0) {
@@ -374,12 +415,12 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
             // Sectiune executabila fara date pe disc
             if (sec[i].SizeOfRawData == 0 && (charact & IMAGE_SCN_MEM_EXECUTE)) {
                 r->flags |= ANOMALY_EMPTY_SEC;
-                //scor mare, deoarece o secțiune executabilă fără date pe disc e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
+                // scor mare, deoarece o secțiune executabilă fără date pe disc e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
             }
 
             // PointerToRawData == 0 dar SizeOfRawData > 0 = malformatie structurala
             if (sec[i].PointerToRawData == 0 && sec[i].SizeOfRawData > 0) {
-                //scor mediu, deoarece e o malformație structurală care poate fi cauzată de un packer prost sau de coruperea intenționată a fișierului pentru a împiedica analiza
+                // scor mediu, deoarece e o malformație structurală care poate fi cauzată de un packer prost sau de coruperea intenționată a fișierului pentru a împiedica analiza
             }
 
             // EP intr-o sectiune fara date pe disc
@@ -387,22 +428,22 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
                 ep < sec[i].VirtualAddress + sec[i].Misc.VirtualSize &&
                 sec[i].SizeOfRawData == 0) {
                 r->flags |= ANOMALY_EP_IN_0_SEC;
-                //scor foarte mare, deoarece un EP care cade într-o secțiune fără date pe disc e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
+                // scor foarte mare, deoarece un EP care cade într-o secțiune fără date pe disc e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
             }
 
         } else {
-            double h = calculate_entropy(pFile + sec[i].PointerToRawData, sec[i].SizeOfRawData);
+            double h = calculate_entropy((int8*)(pFile + sec[i].PointerToRawData), sec[i].SizeOfRawData);
             
             if (h > 7.2 && (charact & IMAGE_SCN_MEM_EXECUTE)) {
                 // Cod executabil criptat - 7.2 e suficient de strict
                 r->flags |= ANOMALY_HIGH_ENTROPY;
-                //scor mare, deoarece codul executabil cu entropie foarte mare e un indiciu puternic de cod generat dinamic sau criptat (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
+                // scor mare, deoarece codul executabil cu entropie foarte mare e un indiciu puternic de cod generat dinamic sau criptat (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
             } else if (h > 7.8 && !(charact & IMAGE_SCN_MEM_EXECUTE)) {
                 // Date cu entropie EXTREM de mare - 7.8 elimina practic orice date legitime comprimate
                 r->flags |= ANOMALY_HIGH_ENTROPY;
                 if (r->flags & ANOMALY_SUSP_NAME)
                     r->totalScore += 50; // Bonus de coroborare a dovezilor
-                    //scor mediu 
+                    // scor mediu 
                 else
                     r->totalScore += 30;
             }
@@ -477,30 +518,20 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
             if (currentRawEnd > sec[i+1].PointerToRawData)
                 r->flags |= ANOMALY_SEC_OVERLAP;
 
-            // Suprapunere in memorie virtuala — lipseste
+            // Suprapunere in memorie virtuala
             int32 currentVEnd = sec[i].VirtualAddress + vSize;
             if (currentVEnd > sec[i+1].VirtualAddress)
                 r->flags |= ANOMALY_SEC_OVERLAP;
         }
 
-
         // --- M. Sectiune citibila ---
         if (charact & IMAGE_SCN_MEM_READ) readableSections++;
-
 
         // --- N. Sectiune in interiorul header-ului PE ---
         // PointerToRawData mai mic decat SizeOfHeaders inseamna ca
         // datele sectiunii incep in interiorul header-ului PE
         // Dual PE Header trick — header-ul de pe disc e diferit de cel din memorie
-        if (pRaw != 0 && pRaw < nt->OptionalHeader.SizeOfHeaders) {
-            r->flags |= ANOMALY_SEC_IN_HEADER;
-        }
-
-        // --- O. Sectiune in interiorul header-ului PE ---
-        // PointerToRawData mai mic decat SizeOfHeaders inseamna ca
-        // datele sectiunii incep in interiorul header-ului PE
-        // Dual PE Header trick — header-ul de pe disc e diferit de cel din memorie
-        if (pRaw != 0 && pRaw < nt->OptionalHeader.SizeOfHeaders) {
+        if (pRaw != 0 && pRaw < sizeOfHeaders) {
             r->flags |= ANOMALY_SEC_IN_HEADER;
 
             // Daca sectiunea e si writeable = PE Header writeable intentionat
@@ -510,17 +541,15 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
                 r->totalScore += 50;
             }
         }
-        
     }
 
-    // --- G. EP Outside Sections ---
-
+    // --- G. (Continuare) EP Outside Sections ---
     if (!epFound && ep != 0) {
         r->flags |= ANOMALY_EP_OUTSIDE;
-        //scor foarte mare, deoarece un EP care nu cade în nicio secțiune e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
+        // scor foarte mare, deoarece un EP care nu cade în nicio secțiune e un indiciu foarte puternic de cod generat dinamic (ex: shellcode injectat în memorie sau secțiune creată dinamic de un packer)
     }
 
-    // --- H. Numar sectiuni executabile ---
+    // --- H. (Continuare) Numar sectiuni executabile ---
     // Mai mult de 3 sectiuni executabile e foarte neobisnuit pentru cod legitim
     // Packerii si virusii de fisiere adauga adesea sectiuni executabile extra
     // Evaluat dupa bucla deoarece avem nevoie de numarul total
@@ -528,10 +557,10 @@ static void check_section_anomalies(unsigned char* pFile, IMAGE_NT_HEADERS* nt, 
         r->flags |= ANOMALY_MULTI_EXEC;
     }
 
-    // --- M. Sectiune citibila ---
+    // --- M. (Continuare) Sectiune citibila ---
     if (readableSections == 0) {
-    // Un PE fara nicio sectiune citibila e o malformatie foarte clara
-    r->totalScore += 50;
+        // Un PE fara nicio sectiune citibila e o malformatie foarte clara
+        r->totalScore += 50;
     }
 }
 
@@ -604,7 +633,7 @@ static void check_overlay(unsigned char* pFile, IMAGE_DOS_HEADER* dos, IMAGE_NT_
 
     // --- 7. Certificat digital fals ---
     if (overlaySize > 4 && ov[0] == 0x30 && ov[1] == 0x82) {
-        int32 certRVA = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY].VirtualAddress;
+        int32 certRVA = GetDirRVA(nt, IMAGE_DIRECTORY_ENTRY_SECURITY);
         if (certRVA == 0)
             r->totalScore += 40;
     }
@@ -632,7 +661,7 @@ static void check_overlay(unsigned char* pFile, IMAGE_DOS_HEADER* dos, IMAGE_NT_
     } else {
         sampleSize = overlaySize;
     }
-    double h = calculate_entropy(ov, sampleSize);
+    double h = calculate_entropy((int8*)ov, sampleSize);
     if (h > 7.2) {
         r->flags |= ANOMALY_ENTR_OVERLAY;
         r->totalScore += 60;
@@ -641,84 +670,83 @@ static void check_overlay(unsigned char* pFile, IMAGE_DOS_HEADER* dos, IMAGE_NT_
     }
 }
 
-// Verifică prezența TLS Callbacks
-// static int32 check_tls_presence(IMAGE_NT_HEADERS* nt, int32 currentResult) {
-//     if (nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress != 0) {
-//         if (currentResult == 666) return 674; // RWE + TLS = High Suspicion
-//         return currentResult; // Just TLS present
-//     }
-//     return currentResult;
-// }
-
+// ========================================================================
+// FUNCTIA PRINCIPALA - MOTORUL DE ANALIZA I/O
+// ========================================================================
 int32 scanfile(Database *db, Workqueue *wq, int32 indexq, int8 *thread_buffer) {
     AcquireSRWLockShared(&db->lock);
     int8 *dirpath = db->pool + db->entries[indexq].diroffset;
     int8 *filename = db->pool + db->entries[indexq].fileoffset;
-    
     joinpath(dirpath, filename, thread_buffer);
     ReleaseSRWLockShared(&db->lock);
 
     ScanReport fileReport = { ANOMALY_NONE, 0, 0.0 };
 
-    HANDLE hFile = CreateFileA((char*)thread_buffer, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    // Filtru de performanta: Nu scanam .txt, .mp4 etc.
+    int32 len = strlen((char*)filename);
+    if (len < 4) return 0; // Prea scurt pentru a avea extensie relevanta
+    int8* ext = filename + len - 4;
     
-    if (hFile == INVALID_HANDLE_VALUE) { 
-        return 1; 
+    // Scanam doar EXE, DLL, SYS
+    if (_stricmp((char*)ext, ".exe") != 0 && _stricmp((char*)ext, ".dll") != 0 && _stricmp((char*)ext, ".sys") != 0) {
+        return 0; 
     }
+
+    HANDLE hFile = CreateFileA((char*)thread_buffer, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return -1; 
 
     LARGE_INTEGER size;
     GetFileSizeEx(hFile, &size);
-    int32 finalResult = 10;
 
-    // --- Mapping ---
-    HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
-    if (hMap) {
-        unsigned char* pFile = (unsigned char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
-        if (pFile) {
-            IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)pFile;
+    // Limităm la 100MB ca protecție de RAM pentru file pumping
+    if (size.QuadPart >= 64 && size.QuadPart < 100000000) { 
+        HANDLE hMap = CreateFileMapping(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (hMap) {
+            unsigned char* pFile = (unsigned char*)MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+            if (pFile) {
+                IMAGE_DOS_HEADER* dos = (IMAGE_DOS_HEADER*)pFile;
 
-            // --- Analiză PE ---
-            if (size.QuadPart >= 64 && dos->e_magic == IMAGE_DOS_SIGNATURE) {
-                int32 ntOff = (int32)dos->e_lfanew;
+                if (dos->e_magic == IMAGE_DOS_SIGNATURE) {
+                    int32 ntOff = (int32)dos->e_lfanew;
 
-                if (ntOff + sizeof(IMAGE_NT_HEADERS) <= (int32)size.QuadPart) {
-                    IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(pFile + ntOff);
-                    
-                    if (nt->Signature == IMAGE_NT_SIGNATURE) {
-                        finalResult = 5; // Valid PE
+                    // Validare bounds pentru NT Header
+                    if (ntOff > 0 && ntOff + sizeof(IMAGE_NT_HEADERS) <= (int32)size.QuadPart) {
+                        IMAGE_NT_HEADERS* nt = (IMAGE_NT_HEADERS*)(pFile + ntOff);
+                        
+                        if (nt->Signature == IMAGE_NT_SIGNATURE) {
+                            
+                            // 1. Verificăm malformații de Header
+                            check_header_malformations(pFile, nt, &fileReport);
+                            
+                            // 2. Verificăm Secțiunile
+                            IMAGE_SECTION_HEADER* secTable = IMAGE_FIRST_SECTION(nt);
+                            int numSec = nt->FileHeader.NumberOfSections;
 
-                        // 1. Verificăm malformații de Header
-                        check_header_malformations(pFile, nt, &fileReport);
-
-                        // 2. Verificăm Secțiunile
-                        IMAGE_SECTION_HEADER* secTable = IMAGE_FIRST_SECTION(nt);
-                        int numSec = nt->FileHeader.NumberOfSections;
-
-                        if ((unsigned char*)(secTable + numSec) <= (pFile + size.QuadPart)) {
-                            check_section_anomalies(pFile, nt, &fileReport, (int32)size.QuadPart);
-
-                            if ((fileReport.flags & ANOMALY_SEC_IN_HEADER) && (nt->OptionalHeader.FileAlignment == nt->OptionalHeader.SectionAlignment && nt->OptionalHeader.FileAlignment <= 0x200)) {
-                                fileReport.totalScore += 40;
-                            }
-
-                            if (fileReport.totalScore > 50) {
+                            // Ne asigurăm că tabela de secțiuni se află în interiorul fișierului
+                            if ((unsigned char*)(secTable + numSec) <= (pFile + size.QuadPart)) {
+                                check_section_anomalies(pFile, nt, &fileReport, (int32)size.QuadPart);
                                 check_trailing_dots_imports(pFile, nt, &fileReport, (int32)size.QuadPart);
+                                check_overlay(pFile, dos, nt, &fileReport, (int32)size.QuadPart);
                             }
-                            // 3. Verificăm TLS (folosind rezultatul de la secțiuni pentru context)
-                            //finalResult = check_tls_presence(nt, finalResult);
-                        } else {
-                            finalResult = 668; // Out of bounds
+                            
+                            // 3. RAPORTAREA MALWARE-ULUI
+                            // Orice scor > 70 este extrem de suspect
+                            if (fileReport.totalScore >= 70) {
+                                printf("\n\n[!!!] MALWARE DETECTAT [!!!]\n");
+                                printf("=> Cale: %s\n", thread_buffer);
+                                printf("=> Scor Heuristic: %d/100 (Flags: 0x%X)\n", fileReport.totalScore, fileReport.flags);
+                                printf("================================================\n\n");
+                            }
                         }
                     }
-                } else {
-                    finalResult = 6; // Doar MZ
                 }
+                UnmapViewOfFile(pFile);
             }
-            UnmapViewOfFile(pFile);
+            CloseHandle(hMap);
         }
-        CloseHandle(hMap);
     }
-
     CloseHandle(hFile);
-    return finalResult;
+    
+    // Returneaza scorul pentru a putea fi prelucrat in exterior (ex: pus in carantina)
+    return fileReport.totalScore; 
 }
